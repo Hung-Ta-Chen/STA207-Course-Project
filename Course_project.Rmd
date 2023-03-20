@@ -1,0 +1,705 @@
+---
+title: "Course Project"
+author: "HungTa Chen"
+date: "2023-03-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(kableExtra)
+library(ggplot2)
+library(rlang)
+library(dplyr)
+library(tidyr)
+library(viridis)
+library(gplots)
+library(lmerTest)
+library(car)
+library(stats)
+library(lmerTest)
+library(s20x)
+library(influence.ME)
+library(ROCR)
+library(xgboost)
+library(caret)
+library(forecast)
+```
+
+# Abstract
+
+This report presents an analysis of a dataset consisting of the neural activities and stimuli from mice performing a decision-making task. The analysis focuses on two main questions: (1) how the neural activities and stimuli are related to the outcome of the task, and (2) how well the outcome of the task can be predicted from the neural activities and stimuli.
+
+For the first question, a linear regression model is used to investigate the relationship between neural activities and stimuli with the reaction time of the mice. The analysis indicates that there is a significant positive relationship between the neural activities and stimuli, and the model explains a moderate amount of the variance.
+
+For the second question, logistic regression and XGboost models are used to predict the success or failure of each trial based on the neural activities and stimuli. The analysis reveals that adding higher order terms to the logistic regression model improves its performance, but the specificity is extremely low. The XGboost model outperforms the logistic regression model, achieving an AUC of 0.69.
+
+Overall, this report highlights the potential of using neural activities and stimuli to predict behavioral outcomes, but also emphasizes the importance of careful model selection and evaluation to ensure accurate predictions.
+
+# Introduction
+
+In *Distributed coding of choice, action and engagement across the mouse brain (2019)* by Steinmetz et al., researchers used Neuropixels probes to record from approximately 30,000 neurons in 42 brain regions of mice performing a visual discrimination task. Their goal was to delineate the spatial distribution of neurons underlying vision, choice, action, and behavioral engagement in the brain. The results revealed organizing principles for the distribution of neurons encoding behaviorally relevant variables across the mouse brain, and shed light on the neural correlates of movements, rewards, and other task variables across multiple brain regions.
+
+Building on this work, our project aims to analyze and visualize the dataset to gain insights into the organization of neurons involved in behaviorally relevant processes. We try to analyze how the neural activity in the visual cortex is modulated by the two stimuli and how this information can be utilized to predict the outcome of the trial.
+
+Specifically, we seek to answer two questions:
+
+1.  How do neurons in the visual cortex respond to the stimuli presented on the left and right?
+
+2.  How to predict the outcome of each trial using the neural activities and stimuli?
+
+The potential impact of our analysis is significant, as it may help uncover new principles of brain organization that can inform future studies on perception and decision-making. Additionally, understanding the neural mechanisms underlying these processes can provide insights into the causes and potential treatments of neurological disorders that affect these functions.
+
+# Background
+
+In this project, we analyze a subset of data collected by Steinmetz et al. (2019) on a total of 10 mice over 39 sessions. During the experiments, visual stimuli were presented to the mice, who were required to make decisions based on the stimuli using a wheel controlled by their forepaws. A reward or penalty was subsequently administered based on the outcome of their decisions. The activity of the neurons in the mice's visual cortex was recorded during the trials and made available in the form of spike trains, which are collections of timestamps corresponding to neuron firing.
+
+The dataset for this project consists of spike trains of neurons in the visual cortex during the trials from the onset of the stimuli to 0.4 seconds post-onset. The dataset includes five variables for each trial, namely *feedback_type*, *contrast_left*, *contrast_right*, *time*, and *spks*. Five variables are available for each trial, namely
+
+-   `feedback_type`: type of the feedback, 1 for success and -1 for failure
+
+-   `contrast_left`: contrast of the left stimulus
+
+-   `contrast_right`: contrast of the right stimulus
+
+-   `time`: centers of the time bins for `spks`
+
+-   `spks`: numbers of spikes of neurons in the visual cortex in time bins defined in `time`
+
+For this project, we focus specifically on the spike trains of neurons in the visual cortex from five sessions (Sessions 1 to 5) of two mice (Cori and Frossman).
+
+```{r echo=FALSE, eval=TRUE}
+session=list()
+name = c()
+date = c()
+for(i in 1:5){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+  name = append(name, session[[i]]$mouse_name)
+  date = append(date, session[[i]]$date_exp)
+}
+t1 = data.frame(name=name, date=date)
+colnames(t1) = c("Mouse Name", "Date")
+t1 %>%
+  kbl(caption = "") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+```{r echo=FALSE, eval=FALSE, results='hold'}
+# Take the 11th trial in Session 1 for example
+id=11
+#session[[1]]$feedback_type[id]
+#session[[1]]$contrast_left[id]
+#session[[1]]$contrast_right[id]
+#length(session[[1]]$time[[id]])
+#dim(session[[1]]$spks[[id]])
+
+cat("Dimension of spks\n")
+for(i in 1:5){
+  cat(sprintf("%dth session:", i))
+  print(dim(session[[i]]$spks[[1]]))
+}
+
+```
+
+Also, `spks` is actually a large 2D array, which is relatively complicated for analysis. Therefore, if we want to conduct some analysis on `spks`, we need further action to handle it, and this will be addressed in the Descriptive analysis part.
+
+# Descriptive analysis
+
+## Basic description and preprocessing
+
+### Checking NA values
+
+We start from checking if there's any NA in our data. Luckily there's no NA value presenting in the data.
+
+```{r echo=FALSE, eval=TRUE}
+for(s_id in 1:5){
+  has_NA = FALSE
+  for(list in session[[s_id]]){
+    has_NA = has_NA | any(is.na(list))
+  }
+  cat(sprintf("NA in Session %d: %s\n", s_id, ifelse(has_NA, "TRUE", "FALSE")))
+}
+```
+
+### Number of trials in each session
+
+From the table below, we can see that the number of trials in each session are is not consistent, ranging from 214 to 254.
+
+```{r echo=FALSE, eval=TRUE}
+num_trials = c()
+for(i in 1:5){
+  num_trials = append(num_trials, length(session[[i]]$feedback_type))
+}
+session_names = c("1 (Cori)", "2 (Cori)", "3 (Cori)", "4 (Frossman)", "5 (Frossman)")
+num_trials_df = data.frame(session=session_names, num_trials=num_trials)
+colnames(num_trials_df) = c("Session", "# of Trials")
+num_trials_df %>%
+  kbl(caption = "# of trials in sessions") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+### Number of neurons in each session
+
+From the table below, we can see that the number of neurons in each session also is not consistent, ranging from 99 to 533.
+
+```{r echo=FALSE, eval=TRUE}
+num_trials = c()
+for(i in 1:5){
+  num_trials = append(num_trials, dim(session[[i]]$spks[[1]])[1])
+}
+session_names = c("1 (Cori)", "2 (Cori)", "3 (Cori)", "4 (Frossman)", "5 (Frossman)")
+num_trials_df = data.frame(session=session_names, num_trials=num_trials)
+colnames(num_trials_df) = c("Session", "# of Neurons")
+num_trials_df %>%
+  kbl(caption = "# of neurons in sessions") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+### Preprocessing `spks`
+
+Inconsistent number of neurons also indicates that we cannot just directly use `spks` for our analysis since it's not comparable across different sessions. Also, as we already mentioned in the background, `spks` is a 2D array (\> 7800 entries) which is too complicated for our analysis, so we need another statistics for our analysis on neuron firing.
+
+One viable option is the mean firing rate, which is the average number of spikes per second across all neurons within a given 0.4 seconds time interval. It's a good alternative because it provides a measure of the overall activity level of each neuron over the course of the trials. By averaging the number of spikes across all time bins, we can obtain a single value that reflects the neuron's firing rate throughout the entire duration of the trial. While this method does not capture the temporal dynamics of the firing pattern, it provides a useful summary statistic that can be used to compare the activity levels of different neurons.
+
+```{r echo=FALSE, eval=TRUE}
+for(s_id in 1:5){
+  n.trials=length(session[[s_id]]$spks)
+  n.neurons=dim(session[[s_id]]$spks[[1]])[1]
+  fire_rate=numeric(n.trials)
+  for(i in 1:n.trials){
+    fire_rate[i]=sum(session[[s_id]]$spks[[i]])/n.neurons/0.4
+  }
+  session[[s_id]]$fire_rate = fire_rate
+  print(head(session[[s_id]]$fire_rate))
+}
+```
+
+After executing the code above, now we have a new variable `fire_rate` for each trial, which is a single value.
+
+### Preprocessing categorical variables
+
+As can be seen from the background section, there are several categorical variables that we are interested in, including `feedback_type`, `contrast_left` and `contrast_right`. However, if we take a look at the data type, we will find that none of them are factor. Therefore, we need to convert them into a factor for further analysis.
+
+```{r echo=FALSE, eval=TRUE}
+s = session[[1]]
+for(i in seq_along(s)){
+  cat(sprintf("Type of `%s`: ", names(s)[i]))
+  print(class(s[[i]]))
+}
+```
+
+```{r echo=TRUE, eval=TRUE}
+for(i in 1:5){
+  session[[i]]$feedback_type = as.vector(c(session[[i]]$feedback_type))
+  session[[i]]$contrast_left = as.factor(c(session[[i]]$contrast_left))
+  session[[i]]$contrast_right = as.factor(c(session[[i]]$contrast_right))
+}
+s = session[[1]]
+for(i in seq_along(s)){
+  cat(sprintf("Type of `%s`: ", names(s)[i]))
+  print(class(s[[i]]))
+}
+```
+
+### Constructing a new Dataset
+
+Since our current dataset is quite complicated and includes several unnecessary variables, we decide to construct a new one containing only the necessary ones.
+
+```{r echo=FALSE, eval=TRUE}
+contrast_left_all = c()
+contrast_right_all = c()
+feedback_type_all = c()
+fire_rate_all = c()
+session_id = c()
+
+for(i in 1:5){
+  contrast_left_all = c(as.factor(contrast_left_all), session[[i]]$contrast_left)
+  contrast_right_all = c(as.factor(contrast_right_all), session[[i]]$contrast_right)
+  feedback_type_all = c(feedback_type_all, session[[i]]$feedback_type)
+  fire_rate_all = c(fire_rate_all, session[[i]]$fire_rate)
+  session_id = c(session_id, rep(i, length(session[[i]]$fire_rate)))
+}
+
+dataset = data.frame(contrast_left=contrast_left_all, contrast_right=contrast_right_all, feedback_type=feedback_type_all, fire_rate=fire_rate_all, session_id=as.factor(session_id))
+str(dataset)
+
+```
+
+Now we have a new dataset with five variables - `feedback_type`: type of the feedback, 1 for success and -1 for failure
+
+-   `contrast_left`: contrast of the left stimulus
+
+-   `contrast_right`: contrast of the right stimulus
+
+-   `fire_rate`: mean firing rate throughout the trial
+
+-   `session_id`: the session that the trial belongs to
+
+Next, since we have two main questions to answer, I'll divide the rest of Descriptive analysis into three parts, one for Q1, one for Q2, the last one for other purposes.
+
+### Preprocessing feedback_type
+
+In Q2, we want to predict the outcome of the trials, which is either success or fail. Since the binary outcome of logistic regression should be in {0, 1}, we have to transform our data from -1, 1 to 0, 1.
+
+```{r echo=FALSE, eval=TRUE}
+dataset$feedback_type = as.numeric(dataset$feedback_type)
+for(i in 1:length(dataset$feedback_type)){
+  if(dataset$feedback_type[i] == -1){
+    dataset$feedback_type[i] = 0
+  }
+}
+```
+
+```{r echo=FALSE, eval=TRUE}
+head(dataset$feedback_type, 10)
+```
+
+## Descriptive analysis for Q1
+
+For Q1, since we are interested in how neurons respond to the stimuli presented on the left and right, we first have some preliminary analysis on `contrast_left` and `contrast_right`.
+
+### Number of values in each treatment group
+
+As see in the table below, the frequency of each treatment group differs a lot, so we might consider an unbalanced design here.
+
+```{r echo=FALSE, eval=TRUE}
+xtabs(~contrast_left+contrast_right,data=dataset)
+```
+
+### Main effect of left and right contrast
+
+Since we are interested if different levels in contrast have different effects on the mean firing rate, we plot the main effect plot to gain some insight about these two factors. In the main effect plot of left contrast, we can see that contrast=0.5 has the highest mean firing rate, while contrast=0.25 has the lowest mean firing rate. In the main effect plot of right contrast, we can see that contrast=1 has the highest mean firing rate, while contrast=0.25 has the lowest mean firing rate.
+
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center'}
+par(mfrow=c(1,2))
+plotmeans(fire_rate~contrast_left,data=dataset,xlab = "left contrast levels",ylab="mean firing rate",main="Main effect of left contrast stimulus",cex.main=0.85)
+plotmeans(fire_rate~contrast_right,data=dataset,xlab = "right contrast levels",ylab="mean firing rate",main="Main effect of right contrast stimulus",cex.main=0.85)
+```
+
+Also, since we're not sure if different mice has different response to the stimuli, we also plot the main effect plot of each session. We can see that different sessions have different patterns in the main effect plot of left and right contrast, therefore we might have to take session into consideration while building our model, like using a random intercept.
+
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center'}
+for(i in 1:5){
+  par(mfrow=c(1,2))
+  plotmeans(fire_rate~contrast_left,data=dataset[dataset$session_id==i, ],xlab = "left contrast levels",ylab="mean firing rate",main="Main effect of left contrast ",cex.main=0.85)
+  plotmeans(fire_rate~contrast_right,data=dataset[dataset$session_id==i, ],xlab = "right contrast levels",ylab="mean firing rate",main="Main effect of right contrast ",cex.main=0.85)
+  mtext(paste0("session",i),side = 3,line = -0.79,cex=1.2,outer = TRUE)
+}
+```
+
+### Interaction between left and right contrast
+
+Now we use interaction plot to see if there's any interaction between left and right contrast. In the interaction plot, lines clearly intersect with one another, which indicates the presence of interaction. Therefore, we should include the interaction term in our model.
+
+```{r echo=FALSE, eval=TRUE, fig.width=5, fig.height=3, fig.align = 'center'}
+interaction.plot(dataset$contrast_left,dataset$contrast_right,dataset$fire_rate,ylab="mean firing rate",xlab="left contrast",trace.label = "right contrast",col=c("purple","red","green","blue"),main="Interaction between right and left contrast",cex.main=1)
+```
+
+Just like the main effects part, we also plot the interaction plot for each session. In each plot, we can clearly see some intersection, so the interaction does exist in every session.
+
+```{r echo=FALSE, eval=TRUE, fig.width=5, fig.height=3, fig.align = 'center'}
+for(i in 1:5){
+  interaction.plot(dataset$contrast_left[dataset$session_id==i],dataset$contrast_right[dataset$session_id==i],dataset$fire_rate[dataset$session_id==i],ylab="mean firing rate",xlab="left contrast",trace.label = "right contrast",col=c("purple","red","green","blue"),main=paste0("Interaction in session ", i),cex.main=1)
+}
+```
+
+### Distribution of mean firing rate
+
+In Q1, our main interest is mean firing rate, therefore we also take a look at its distribution. First we plot the distribution of overall mean firing rate. We can see that its distribution is actually right-skewed instead of normal.
+
+```{r echo=FALSE, eval=TRUE, fig.width=5, fig.height=3, fig.align = 'center'}
+ggplot(dataset, aes(x=fire_rate))+
+  geom_density(fill="lightblue")
+```
+
+Then we take a look at the distribution of mean firing rate in each session. We can see that, the distributions of mean firing rate of session 1, 2, 3 are all centered between 3 and 4, while the distributions of mean firing rate of session 4, 5 are centered at 2 and 1 respectively. This shows that the firing rate of different mice definitely are different, so we should introduce random intercepts into our model.
+
+```{r echo=FALSE, eval=TRUE, fig.width=5, fig.height=3, fig.align = 'center'}
+ggplot(dataset, aes(x=fire_rate, color=session_id))+
+  geom_density()
+```
+
+## Descriptive analysis for Q2
+
+In Q2, we're interested in the outcome of the trial (feedback type). Therefore, we take a look at the number of two outcomes. Also, here we don't check the outcome in each session because we won't use session number or the name of mouse in prediction.
+
+```{r echo=FALSE, eval=TRUE}
+success = sum(dataset$feedback_type == 1)
+fail = sum(dataset$feedback_type == 0)
+out_df = data.frame(outcome=c("success", "fail"), count=c(success, fail))
+colnames(out_df) = c("Outcome", "Count")
+out_df %>%
+  kbl(caption = "Number of outcomes") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+## Other Descriptive analysis
+### Mean firing rate over time
+Since in each session the researchers had trials on the same mouse repeatedly, we can consider the array of the mean firing rate as a time series. Although this is not the main focus of this course, we still interested in if the mean firing rate has any change or pattern over the time, like if it rises or drops as the experiment goes on.
+
+So let's start from the most basic strategy, we plot the mean firing rate over time.
+```{r echo=FALSE, eval=TRUE, fig.width=5, fig.height=3, fig.align = 'center'}
+for(i in 1:5){
+  trial = seq_len(length(session[[i]]$fire_rate))
+  fire_rate = session[[i]]$fire_rate
+  df_t = data.frame(trial, fire_rate)
+  gplot = ggplot(data = df_t, aes(x = trial, y = fire_rate)) +
+  geom_line() +
+  labs(x = "Trial Index", y = "Mean firing rate", title=paste0("session ", i))+
+  geom_line(color = "red")
+  print(gplot)
+}
+
+```
+
+In plots 1, 3, 4, and 5, we can observe a general decreasing trend over time. However, since the mean firing rate fluctuates drastically, it's hard for us to observe. 
+To deal with this problem, we first use 'ets' function in 'forecast' library to smooth the mean firing rate series, and then plot it again.
+```{r echo=FALSE, eval=TRUE, fig.width=5, fig.height=3, fig.align = 'center'}
+for(i in 1:5){
+  trial = seq_len(length(session[[i]]$fire_rate))
+  fire_rate = session[[i]]$fire_rate
+  ets_fit = ets(fire_rate)
+  df_t = data.frame(trial, f_rate=fitted(ets_fit))
+  gplot = ggplot(data = df_t, aes(x = trial, y = f_rate)) +
+  geom_line() +
+  labs(x = "Trial Index", y = "Smoothed Mean firing rate", title=paste0("session ", i))+
+  geom_line(color = "red")
+  print(gplot)
+}
+
+```
+
+This time we can clearly see the decreasing trend of the mean firing rate over time, so we conclude that the responsive ability of neurons actually declines as the experiment went on.
+
+
+# Inferential analysis (Q1)
+
+As stated previously, we did observe that different sessions have different distributions of mean firing rate and contrast patterns, so we will introduce a random intercept into our model. Also, we are interested in the effect of stimulus on mean firing rate, so we will have two fixed effects in our model, one for left contrast stimulus and the other for right contrast stimulus. Combining them together, we get a mixed effect 2 way ANOVA model.
+
+## Mixed effect 2 way ANOVA model
+
+$$Y_{ijkl} = \mu_{...} + \alpha_i + \beta_j + (\alpha\beta)_{ij} + \gamma_k + \epsilon_{ijkl}$$ where $i=1,...,4$, $j=1,...,4$, $k=1,...,5$, $l=1,...,n_{ijk}$.
+
+-   $Y_{ijkl}$: the mean firing rate of n-th trial for i-th type of left contrast (0, 0.25, 0.5, 1), j-th type of right contrast (0, 0.25, 0.5, 1) in k-th session
+
+-   $\mu_{...}$: the overall mean of all mean firing rates across all left contrast types, all right contrast types and all sessions
+
+-   $\alpha_i$: the fixed effect of i-th type of left contrast on mean firing rate
+
+-   $\beta_j$: the fixed effect of j-th type of right contrast on mean firing rate
+
+-   $(\alpha\beta)_{ij}$: the interaction effect between i-th type of left contrast and j-th type of right contrast on mean firing rate
+
+-   $\gamma_k$: the random intercept for k-th session
+
+-   $\epsilon_{ijkl}$: the error term representing the variability in mean firing rate that is not accounted for by the effect of i-th type of left contrast, j-th type of right contrast and k-th session
+
+**Constraints** - $\Sigma_{i=1}^4\alpha_i=0, \Sigma_{j=1}^4\beta_i=0$
+
+
+-   $\Sigma_{i=1}^4(\alpha\beta)_{ij}=0, \Sigma_{j=1}^4(\alpha\beta)_{ij}=0$
+
+-   $\gamma_k \sim N(0, \sigma_{\gamma}^2)$
+
+-   $\epsilon_{ijkl} \sim N(0, \sigma^2)$
+
+### Model fitting
+
+Since interaction term is present in our model, we fit a type III anova here. We can see that both left contrast and right contrast are extremely significant with very small p-value (0.0000974 and 0.0000005), while the interaction is at the edge of being significant since it has a relatively large p-value (0.0435). So we can say that left contrast and right contrast do have a strong effect on mean firing rate.
+
+```{r echo=FALSE, eval=TRUE}
+model_full = lmer(fire_rate~ contrast_left*contrast_right+(1|session_id), data=dataset)
+
+anova(model_full) %>%
+  kbl(caption = "Type III Analysis of Variance Table with Satterthwaite's method") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+<br>
+
+<br>
+
+From the summary of the model we can see that about $\frac{1.2667}{1.2667+0.3995}=0.76$ of variability can be explained by session. Also. we can see all estimated coefficients listed below.
+
+```{r echo=FALSE, eval=TRUE, results='hold'}
+summary(model_full)
+```
+
+### Test for interaction
+
+Next, we use hypothesis test to test if the interaction term is significant. $H_0: (\alpha\beta)_{ij}=0$ vs $H_a: (\alpha\beta)_{ij} \neq 0$ Using a F-test, we see that the p-value of the interaction term is 0.04, so we basically can still reject the null hypothesis at significance level 0.05, which means we conclude that the interaction term exists.
+
+```{r echo=FALSE, eval=TRUE, results='hold'}
+model_reduced<-lmer(fire_rate~contrast_left+contrast_right+(1|session_id), data=dataset)
+anova(model_full, model_reduced)%>%
+  kbl(caption = "") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+### Test for treatment group with the highest mean firing rate
+Next we use Tukey test to test if there's a treatment group that has the highest mean firing rate. 
+For left contrast, surprisingly we can't find a factor level with the highest mean firing rate according to the test, since none of the pairs has a p-value smaller than 0.05, which means none of them are not significant at significance level 0.05.
+```{r echo=FALSE, eval=TRUE, fig.align = 'center'}
+model = aov(fire_rate ~ contrast_left + contrast_right, data = dataset)
+tuk_test = TukeyHSD(model, "contrast_left")
+tuk_test$contrast_left %>%
+  kbl(caption = "") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+```{r echo=FALSE, eval=TRUE, fig.align = 'center'}
+par(mfrow=c(2,2))
+plot(tuk_test, las=1 , col="brown")
+par(mfrow=c(1,1))
+```
+
+As for right contrast, we found that contrast=1 actually has the highest mean firing rate because all pairs including contrast 1 all have a very small p-value (0.0000004, 0.0000050, 0.0140141), which means they are significant. Therefore, we can conclude that neurons has the most intense response when right contrast stimulus is 1. Also, we can say that right contrast has a more significant effect than the left contrast
+
+```{r echo=FALSE, eval=TRUE, fig.align = 'center'}
+tuk_test = TukeyHSD(model, "contrast_right")
+tuk_test$contrast_right %>%
+  kbl(caption = "") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+```{r echo=FALSE, eval=TRUE, fig.align = 'center'}
+par(mfrow=c(2,2))
+plot(tuk_test, las=1 , col="brown")
+par(mfrow=c(1,1))
+```
+
+
+# Sensitivity analysis (Q1)
+
+## Test normality
+
+### Distribution of residuals
+
+We first use a histogram to plot the distribution of residuals. The distribution  looks approximately normal.
+```{r echo=FALSE, eval=TRUE, fig.align = 'center', fig.width=5, fig.height=3}
+fitted_values <- predict(model_full, type = "response")
+residuals <- residuals(model_full)
+hist(residuals)
+```
+
+### QQplot
+
+In the QQ plot, despite a slightly heavy right tail, the points still roughly follows the diagonal line. Therefore, we can conclude that the normality assumption of the model is almost satisfied.
+```{r echo=FALSE, eval=TRUE, fig.align = 'center', fig.width=5, fig.height=3}
+qqnorm(residuals)
+qqline(residuals)
+```
+
+### Fitted value vs Residual plot
+
+In the Fitted value vs Residual plot, we see a scattering of points around the horizontal line (i.e., the zero line), which suggests that the residuals are randomly distributed and there is no pattern indicating non-normality.
+However, the plot also shows that the residuals have a inconsistent spread across all fitted values (getting larger for larger fitted values), so the homogeneity of variance might not be satisfied. To further confirm this, we use Levene's test next.
+
+```{r echo=FALSE, eval=TRUE, fig.align = 'center', fig.width=6, fig.height=4}
+plot(residuals~fitted_values,type='p',pch=16,cex=1.5,xlab="Fitted values",ylab="Residuals")
+abline(h = 0, col = "red")
+```
+
+## Test homogeneity of variance
+
+### Levene's test
+
+The null hypothesis of Levene's test is that the variances of the groups are equal, while the alternative hypothesis is that at least one of the variances is different. As we can see from the result table, the p-value is extremely small, so we can reject the null hypothesis. Therefore, the variance is not homogeneous.
+```{r echo=FALSE, eval=TRUE, fig.align = 'center'}
+leveneTest(residuals, group = factor(dataset$session_id)) %>%
+  kbl(caption = "Levene's Test for Homogeneity of Variance") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+## Outlier detection
+
+Next we check if there's any outlier, and we use 4/N as our threshold. 
+Here our threshold is 0.0033, and obviously there are many points in the plot which are larger than the threshold, so outliers exist in our data.
+```{r echo=FALSE, eval=TRUE, fig.align = 'center', fig.width=5, fig.height=3}
+infl <- influence(model_full, obs = TRUE)
+#cooks.distance(infl)
+plot(infl, which = "cook")
+```
+
+# Predictive modeling (Q2)
+
+In Q2, we want to predict the outcome of each trial using the neural activities and stimuli. There are two types of outcome (success & fail), which means this is a binary classification question. For this type of problem, logistic regression model is one of the simplest one, so we will start from it.
+
+## Likelihood ratio test
+
+First thing we have to think about is whether we include the interaction term in our model, so we use likelihood ratio test to test if the interaction term is significant.
+$H_0: \beta_{left*right}=0$ vs $H_a: \beta_{left*right} \neq 0$
+From the result of the F-test, we can see that the p-value is extremely small (0.001168), which means the interaction term is significant. Therefore, we'll include it in our model.
+```{r echo=FALSE, eval=TRUE, fig.align = 'center'}
+lr.model_full = glm(feedback_type~contrast_left*contrast_right+fire_rate, family = binomial(), data=dataset)
+lr.model_reduced = glm(feedback_type~contrast_left+contrast_right+fire_rate,  family = binomial(), data=dataset)
+anova(lr.model_full, lr.model_reduced, test = 'Chi')
+```
+We also take a look at the coefficients of out GLM model. We can see that fire_rate has a postive coefficient, which means it has a positive effect on the success of the trial.
+```{r echo=FALSE, eval=TRUE, fig.align = 'center'}
+summary(lr.model_full)
+```
+
+## Model Diagnostics
+
+### Pearson residuals and deviance residuals
+
+From the boxplot below, we can see that two types of residual are different to some extents, so our model might suffer from lack-of-fit.
+
+```{r echo=FALSE, eval=TRUE, fig.align = 'center', fig.width=5, fig.height=3}
+res.P = residuals(lr.model_full, type = "pearson")
+res.D = residuals(lr.model_full, type = "deviance")
+boxplot(cbind(res.P, res.D), names = c("Pearson", "Deviance"))
+```
+
+### Residual plot
+
+We can see from the plot that although we already added the interaction term into our model, the red curve still somehow shows some nonlinear patterns, so we can consider adding higher order terms into our model.
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center'}
+par(mfrow=c(1,2))
+plot(lr.model_full$fitted.values, res.P, pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(lr.model_full$fitted.values, res.P, spar=0.9), col=2)
+abline(h=0, lty=2, col='grey')
+plot(lr.model_full$fitted.values, res.D, pch=16, cex=0.6, ylab='Deviance Residuals', xlab='Fitted Values')
+lines(smooth.spline(lr.model_full$fitted.values, res.D, spar=0.9), col=2)
+abline(h=0, lty=2, col='grey')
+```
+
+## Prediction
+
+### Logistic regression model with interaction term
+
+For logistic regression model with interaction term, we get the confusion matrix as shown below.
+According to the confusion matrix, we get
+$$Sensitivity = \frac{TP}{TP+FN}=\frac{72}{72+2}=0.973$$
+$$Specificity = \frac{TN}{TN+FP}=\frac{2}{2+24}=0.077$$
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center'}
+threshold = 0.5
+log.model_inter = glm(feedback_type~contrast_left*contrast_right+fire_rate, data=dataset[101:nrow(dataset), ])
+predict_vals = ifelse(predict(log.model_inter, newdata = dataset[1:100, ])>threshold,1,0)
+labels = dataset$feedback_type[1:100]
+table(predict_vals, labels) %>%
+  kbl(caption = "Confusion matrix") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+Now we plot the ROC and check the AUC.
+
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center', results='hold'}
+pred = prediction(predict(log.model_inter, newdata = dataset[1:100, ]), labels = dataset$feedback_type[1:100])
+perf = performance(pred, measure = "tpr", x.measure = "fpr")
+# Calculate the AUC
+cat(sprintf("AUC: %f\n", performance(pred, "auc")@y.values))
+# Draw the ROC curve
+plot(perf, main = "ROC Curve")
+```
+
+Also, the AUC is only 0.544, so the performance of this model is quite bad.
+
+
+### Logistic regression model with quadratic term
+
+Now we try to include the quadratic term into the model since the residual plot suggests a higher order pattern.
+
+
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center'}
+threshold = 0.5
+log.model_quad = glm(feedback_type~contrast_left*contrast_right+fire_rate+I(fire_rate^2), data=dataset[101:nrow(dataset), ])
+predict_vals_quad = ifelse(predict(log.model_quad, newdata = dataset[1:100, ])>threshold,1,0)
+labels = dataset$feedback_type[1:100]
+table(predict_vals_quad, labels) %>%
+  kbl(caption = "Confusion matrix") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+According to the confusion matrix, we get
+$$Sensitivity = \frac{TP}{TP+FN}=\frac{74}{74+0}=1$$
+$$Specificity = \frac{TN}{TN+FP}=\frac{1}{1+25}=0.038$$
+
+Now we plot the ROC and check the AUC.
+
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center', results='hold'}
+pred_quad = prediction(predict(log.model_quad, newdata = dataset[1:100, ]), labels = dataset$feedback_type[1:100])
+perf_quad = performance(pred_quad, measure = "tpr", x.measure = "fpr")
+# Calculate the AUC
+cat(sprintf("AUC: %f\n", performance(pred_quad, "auc")@y.values))
+# Draw the ROC curve
+plot(perf_quad, main = "ROC Curve")
+```
+
+We can see that the AUC is 0.65, which is a little better than the previous model. But we can actually see that it's specificity is extremely low, which means the model bascially just always predict "success" as the outcome.
+
+
+To improve the performance, we might consider adding a random effect term into the model. However, since the question says that we only use the stimuli and neuron activity to predict the outcome, I don't think adding session or mouse name into our model abide by the limitation.
+
+### XGboost
+
+Therefore, I want to try XGboost model, which is quite popular in prediction problem, to see how good the prediction result can be.
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center', results='hold'}
+formula = as.formula("feedback_type ~ contrast_left + contrast_right + fire_rate")
+data_encoded = model.matrix(formula, dataset)
+
+X_train = data.matrix(data_encoded[101:nrow(dataset), -1])
+Y_train = dataset$feedback_type[101:nrow(dataset)]
+X_test = data.matrix(data_encoded[1:100, -1])
+Y_test = dataset$feedback_type[1:100]
+
+train_set = xgb.DMatrix(data = X_train, label = Y_train)
+test_set = xgb.DMatrix(data = X_test, label = Y_test)
+```
+
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center', results='hide'}
+watchlist <- list(train=train_set, test=test_set)
+xgb_model = xgb.train(data = train_set, max.depth = 4, watchlist=watchlist, nrounds = 9)
+```
+
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center', results='hold'}
+# Wrapper func for predict()
+xgb_predict = function(model, test_set){
+  pred = predict(model, test_set)
+  pred = as.numeric(pred > 0.5)
+  return(pred)
+}
+table(xgb_predict(xgb_model, test_set), Y_test) %>%
+  kbl(caption = "Confusion matrix") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+According to the confusion matrix, we get
+$$Sensitivity = \frac{TP}{TP+FN}=\frac{72}{72+2}=0.973$$
+$$Specificity = \frac{TN}{TN+FP}=\frac{3}{3+23}=0.115$$
+
+Now we plot the ROC and check the AUC.
+```{r echo=FALSE, eval=TRUE, fig.width=6, fig.height=4, fig.align = 'center', results='hold'}
+pred_xgb = prediction(predict(xgb_model, test_set), labels = Y_test)
+perf_xgb = performance(pred_xgb, measure = "tpr", x.measure = "fpr")
+# Calculate the AUC
+cat(sprintf("AUC: %f\n", performance(pred_xgb, "auc")@y.values))
+# Draw the ROC curve
+plot(perf_xgb, main = "ROC Curve")
+```
+We can see the AUC of XGBoost model (0.69) is higher than logistic regression model.
+
+# Conclusion
+1. In Q1, we used a mixed-effect 2 way ANOVA to fit the data and found that the contrast of right stimuli has a more significant effect than left stimuli on the neuron respond. Also, we found that the normality assumption of the model is almost satisfied, but the homogeneity of variance assumption is not satisfied. Outliers exist in the data.
+
+2. In Q2, we used a logistic regression model to predict the success or failure of each trial using the neural activities and stimuli. We found that the inclusion of interaction and quadratic terms improved the model fit, but the model still suffered from lack-of-fit and had low specificity.
+
+3. We then tried XGBoost model, which is a popular prediction method, and found that it outperformed the logistic regression model with an AUC of 0.69.
+
+4. Based on the analysis and modeling performed, we can conclude that the neural activities and stimuli have some predictive power for the outcome of each trial, but the model still has room for improvement, such as including the types of neurons or the temporal effect on neurons (the decreasing trend of mean firing rate). Further investigation and modeling could be done to explore other factors that may affect the outcome, and to try and improve the model's performance.
+
+
+# Appendix
+
+## Reference {.unnumbered}
+- Distributed coding of choice, action and engagement across the mouse brain (2019, Steinmetz et al.)
+- Course notes (Chapter4-6)
+- Discussion notes
+- R documentation
+- chatGPT
+
+## Github repo link
+https://github.com/Hung-Ta-Chen/STA207-Course-Project
+
+## Session info {.unnumbered}
+
+```{r}
+sessionInfo()
+```
